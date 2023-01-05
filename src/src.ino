@@ -11,6 +11,23 @@
 #include "SSD1306.h"
 #include "font.h" //// Created by http://oleddisplay.squix.ch/
 
+#include <WiFi.h>
+#include <PubSubClient.h>
+
+const char* ssid = "ssid";
+const char* password = "password";
+const char* mqtt_server = "192.168.0.10";
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+unsigned long lastMsg = 0;
+#define MSG_BUFFER_SIZE	(200)
+char msg[MSG_BUFFER_SIZE];
+long lastReconnectAttempt = 0;
+
+const char* mqttOutTopic = "WaterRower/Out";
+const char* mqttInTopic = "WaterRower/In";
+
 #define btnRIGHT  0
 #define btnUP     1
 #define btnDOWN   2
@@ -228,7 +245,9 @@ class MyCallbacks: public BLECharacteristicCallbacks {
         else {
           for (int i = 0; i < rxValue.length(); i++) {
             char chr = rxValue[i];
-            SerialDebug.print(chr + "Int:" + (int)chr);
+            SerialDebug.print(chr);
+            SerialDebug.print(" Int: ");
+            SerialDebug.print((int)chr);
           }
         }  
           SerialDebug.println();
@@ -575,7 +594,35 @@ void row_start() {
   display.drawString(64, 34, "for start");
   display.display();
   delay(100);
-  while (clicks == 0) {};
+  
+  if (!client.connected()) {
+    long now = millis();
+
+    if (now - lastReconnectAttempt > 5000) {
+      lastReconnectAttempt = now;
+
+      if (reconnect()) {
+        lastReconnectAttempt = 0;
+      }
+    }
+  } else {
+    client.loop();
+  }
+  while (clicks == 0) {
+    if (!client.connected()) {
+      long now = millis();
+
+      if (now - lastReconnectAttempt > 5000) {
+        lastReconnectAttempt = now;
+
+        if (reconnect()) {
+          lastReconnectAttempt = 0;
+        }
+      }
+    } else {
+      client.loop();
+    }
+  };
 
   reset();
   rowing();
@@ -712,6 +759,7 @@ void split() {
 
 //reset function (set to select button)
 void reset() {
+  unsigned long now = millis();
   clicks = 0;
   clicks_old = 0;
   meters = 0;
@@ -722,8 +770,8 @@ void reset() {
   Ms = 0;
   timer1 = 0;
   timer2 = 0;
-  start = millis();
-  old_split = millis();
+  start = now;
+  old_split = now;
   strokes = 0;
   old_strokes = 0;
   stmra = 0;
@@ -734,6 +782,7 @@ void reset() {
   trend = 0;
   resetTimer = 0;
   //lcd.clear();
+  lastMsg = now;
 }
 
 int read_LCD_buttons()
@@ -803,6 +852,46 @@ void displayTimeBattery()
 
 }
 
+void setup_wifi() {
+  delay(10);
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  randomSeed(micros());
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println();
+}
+
+boolean reconnect() {
+  if (client.connect("arduinoClient")) {
+    client.subscribe(mqttInTopic);
+  }
+  return client.connected();
+}
+
 void setup() {
 
   // Start the OLED Display
@@ -822,6 +911,11 @@ void setup() {
   SerialDebug.print  (" * Version ");
   SerialDebug.println(_VERSION);
   SerialDebug.println(" ***********************************/");
+  
+  setup_wifi();
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
+  lastReconnectAttempt = 0;
 
   /*
   esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
@@ -859,18 +953,20 @@ void setup() {
 
 void rowing() {
   while (read_LCD_buttons() != btnLEFT) {
+    unsigned long now = millis();
+
     // prints the variable parameter as selected by keypad
     // variableParameter();
 
     /*calculate split times every 500m*/
     if ((meters % 500) == 0 && meters > 0 ) {
-      timer2 = millis();
-      if ((millis() - timer2) >= 1000) {
+      timer2 = now;
+      if ((now - timer2) >= 1000) {
         split();
       }
     }
     
-    if ((millis() - timer1) >= 1000) {
+    if ((now - timer1) >= 1000) {
       timer1 = millis();
       /* calculate meters/min*/
       Ms = calcmetersmin();
@@ -887,20 +983,33 @@ void rowing() {
         //delay(5000);    
       }
 
+      long sec = (now - start) / 1000;
+      rdKpi.strokeRate = (int)round(spm + old_spm);
+      rdKpi.strokeCount = strokes;
+      rdKpi.averageStokeRate = sec > 0 ? (int)(strokes * 60 * 2 / sec) : 0;
+      rdKpi.totalDistance = meters;
+      rdKpi.instantaneousPace  = (int)round(500 / Ms); // pace for 500m
+      float avrMs = sec > 0 ?  meters / sec : 0;
+      rdKpi.averagePace = (int)round(500 / avrMs);
+      rdKpi.instantaneousPower = (int)round(2.8 * Ms * Ms * Ms); //https://www.concept2.com/indoor-rowers/training/calculators/watts-calculator
+      rdKpi.averagePower = (int)round(2.8 * avrMs * avrMs * avrMs);
+      rdKpi.elapsedTime = sec;
+
+      if (client.connected()) {
+        
+        if (now - lastMsg > 200) {
+          lastMsg = now;
+          snprintf (msg, MSG_BUFFER_SIZE, "{\"strokeRate\"=%d,\"strokeCount\"=%d,\"averageStokeRate\"=%d,\"totalDistance\"=%d,\"instantaneousPace\"=%d,\"averagePace\"=%d,\"instantaneousPower\"=%d,\"averagePower\"=%d,\"elapsedTime\"=%d}",
+                                          rdKpi.strokeRate, rdKpi.strokeCount, rdKpi.averageStokeRate, rdKpi.totalDistance, rdKpi.instantaneousPace, rdKpi.averagePace, rdKpi.instantaneousPower, rdKpi.averagePower, rdKpi.elapsedTime);
+          Serial.print("Publish message: ");
+          Serial.println(msg);
+          client.publish(mqttOutTopic, msg);
+        }
+      }
+
+      continue;
+
       if (deviceConnected) {        //** Send a value to protopie. The value is in txValue **//
-
-        long sec = 1000 * (millis() - start);
-        rdKpi.strokeRate = (int)round(spm + old_spm);
-        rdKpi.strokeCount = strokes;
-        rdKpi.averageStokeRate = (int)(strokes * 60 * 2 / sec);
-        rdKpi.totalDistance = meters;
-        rdKpi.instantaneousPace  = (int)round(500 / Ms); // pace for 500m
-        float avrMs = meters / sec;
-        rdKpi.averagePace = (int)round(500 / avrMs);
-        rdKpi.instantaneousPower = (int)round(2.8 * Ms * Ms * Ms); //https://www.concept2.com/indoor-rowers/training/calculators/watts-calculator
-        rdKpi.averagePower = (int)round(2.8 * avrMs * avrMs * avrMs);
-        rdKpi.elapsedTime = sec;
-
         setCxRowerData();
         //setCxLightRowerData();
         //delay(500); // bluetooth stack will go into congestion, if too many packets are sent
@@ -916,7 +1025,20 @@ void rowing() {
         cRower[2]=0x00;
         pDtCharacteristic->setValue((uint8_t* )cRower, 3);
         pDtCharacteristic->notify();
+      }
 
+      if (!client.connected()) {
+
+        long now = millis();
+        if (now - lastReconnectAttempt > 5000) {
+          lastReconnectAttempt = now;
+
+          if (reconnect()) {
+            lastReconnectAttempt = 0;
+          }
+        }
+      } else {
+        client.loop();
       }
  
       // disconnecting
