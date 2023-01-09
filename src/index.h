@@ -27,9 +27,50 @@ const char MAIN_page[] PROGMEM = R"=====(
   <h1>Elapsed Time: <span class="rowingData" id="elapsedTime">0</span></h1><br>
 </div>
 <script>
+var gateway = "ws://" + window.location.hostname + "/ws";
+var webSocket;
+
+window.addEventListener('load', onLoad);
+
+function onLoad(event) {
+    initWebSocket();
+}
+
+function initWebSocket() {
+    console.log('Trying to open a WebSocket connection...');
+    websocket = new WebSocket(gateway);
+    websocket.onopen    = onOpen;
+    websocket.onclose   = onClose;
+    websocket.onmessage = onMessage;
+}
+
+
+function onOpen(event) {
+    console.log('Connection opened');
+}
+
+function onClose(event) {
+    console.log('Connection closed');
+    setTimeout(initWebSocket, 2000);
+}
+
+function onMessage(event) {
+  var jsonData = JSON.parse(event.data)
+
+  var rowingData = document.getElementsByClassName('rowingData');
+  rowingData.item(0).textContent = jsonData.strokeRate;
+  rowingData.item(1).textContent = jsonData.strokeCount;
+  rowingData.item(2).textContent = jsonData.averageStokeRate;
+  rowingData.item(3).textContent = jsonData.totalDistance;
+  rowingData.item(4).textContent = jsonData.instantaneousPace;
+  rowingData.item(5).textContent = jsonData.averagePace;
+  rowingData.item(6).textContent = jsonData.instantaneousPower;
+  rowingData.item(7).textContent = jsonData.averagePower;
+  rowingData.item(8).textContent = jsonData.elapsedTime;
+}
 
 setInterval(function() {
-  getData();
+  //getData();
 }, 500);
 
 function getData() {

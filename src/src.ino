@@ -56,6 +56,7 @@ const char* mqttInTopic = "WaterRower/In";
 
 #if USE_HTTP
 AsyncWebServer* webServer;
+AsyncWebSocket* webSocket;
 #endif
 
 QueueHandle_t xQueue = xQueueCreate(1, sizeof(char)*MSG_BUFFER_SIZE);
@@ -1137,32 +1138,29 @@ void mainCode(void * parameters) {
   }
 }
 
-void WiFiEvent(WiFiEvent_t event)
-{
-  switch (event) {
-    case SYSTEM_EVENT_STA_CONNECTED:
-      Serial.print("Connected to ");
-      Serial.println(ssid);
-      break;
-    case SYSTEM_EVENT_STA_DISCONNECTED:
-      Serial.print("Trying to connect to ");
-      Serial.println(ssid);
-      WiFi.begin(ssid, password);
-      break;
-    case SYSTEM_EVENT_STA_GOT_IP:
-      Serial.print("IP address: ");
-      Serial.println(WiFi.localIP());
-      break;
-    default:
-      break;
-  }
-}
-
-#if USE_MQTT || USEHTTP
+#if USE_MQTT || USE_HTTP
 void wifiCode(void * parameters) {
   WiFi.mode(WIFI_MODE_STA);
   esp_wifi_set_ps(WIFI_PS_MAX_MODEM);
-  WiFi.onEvent(WiFiEvent);
+  WiFi.onEvent([](WiFiEvent_t event) {
+    switch (event) {
+      case SYSTEM_EVENT_STA_CONNECTED:
+        Serial.print("Connected to ");
+        Serial.println(ssid);
+        break;
+      case SYSTEM_EVENT_STA_DISCONNECTED:
+        Serial.print("Trying to connect to ");
+        Serial.println(ssid);
+        WiFi.begin(ssid, password);
+        break;
+      case SYSTEM_EVENT_STA_GOT_IP:
+        Serial.print("IP address: ");
+        Serial.println(WiFi.localIP());
+        break;
+      default:
+        break;
+    }
+  });
 
   WiFi.begin(ssid, password);
   
@@ -1227,6 +1225,7 @@ void httpCode(void * parameters) {
   vTaskDelay(500);
 
   webServer = new AsyncWebServer(80);
+  webSocket = new AsyncWebSocket("/ws");
  
   webServer->on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     String s = MAIN_page;
@@ -1240,13 +1239,36 @@ void httpCode(void * parameters) {
         request->send(200, "application/json", msgCopy);
     }
   });
+
+  webSocket->onEvent([](AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len){
+    switch (type) {
+        case WS_EVT_CONNECT:
+            Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+            break;
+        case WS_EVT_DISCONNECT:
+            Serial.printf("WebSocket client #%u disconnected\n", client->id());
+            break;
+        case WS_EVT_DATA:
+        case WS_EVT_PONG:
+        case WS_EVT_ERROR:
+            break;
+    }
+  });
+  
+  webServer->addHandler(webSocket);
   
   vTaskDelay(500);
 
   webServer->begin();
 
-  for(;;) {    
-    vTaskDelay(10);
+  for(;;) {
+    webSocket->cleanupClients();
+
+    char msgCopy[MSG_BUFFER_SIZE];
+    if(xQueuePeek(xQueue, &msgCopy, 10))
+      webSocket->textAll(msgCopy);
+
+    vTaskDelay(500);
   }
 }
 #endif
